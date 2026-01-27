@@ -3,10 +3,10 @@ import cv2                                                #достает кар
 import pandas as pd                                       #нужно для Excel
 from ultralytics import YOLO                              #предобученная модель 
 import tempfile                                           #тащит видео из рам на диск для opencv
-from datetime import datetime, timedelta                  #для времени обнаружения
+from datetime import timedelta                            #для времени обнаружения
 
-#настройки-------------------------
-CONFIDENCE_THRESHOLD = 0.4
+# python -m streamlit run app.py
+
 
 @st.cache_resource                                          #чтобы модель не загружалась заново и осталась в памяти
 # загрузка модели с предобучением
@@ -38,8 +38,6 @@ elif source_option == "Веб-камера":
     if st.button("Включить камеру"):
         cap = cv2.VideoCapture(0) # 0 это веб-камера
 
-
-
 #проверка на файл
 if cap  is not None:
     
@@ -48,8 +46,8 @@ if cap  is not None:
     
     # Счетчик кадров
     frame_count = 0 
-    last_result = None  # для хранения последней рамки
     last_logged_sec = -1  # чтобы не спамить одну секунду
+    
     #цикл модели-----------------------------------------
     while cap.isOpened() and not stop_button:
         
@@ -61,20 +59,20 @@ if cap  is not None:
         #тамкод
         msec = cap.get(cv2.CAP_PROP_POS_MSEC)
         video_time = str(timedelta(milliseconds=int(msec))).split('.')[0]
-        if frame_count % 10 != 0:
+        if frame_count % 5 == 0:
             # verbose=False чтобы терминал не спамил
             results = model.predict(
                 frame, 
-                conf=CONFIDENCE_THRESHOLD, 
+                conf=0.4, # уверенность
                 classes=[21],
                 iou=0.5,  # убирает дубли
                 verbose=False
             )
-            last_result = results 
+
             # статистика
             bears_count = len(results[0].boxes)
             if bears_count > 0:
-                print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")
+                # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")
                 current_sec = int(msec / 1000)
                 
                 if current_sec != last_logged_sec:
@@ -83,17 +81,11 @@ if cap  is not None:
                         "Медведей": bears_count
                     })
                     last_logged_sec = current_sec
-        
-
-        # рисуем всегда
-        if last_result is not None:
-            # старая рамка на новом кадре
-            frame_with_boxes = last_result[0].plot(img=frame)
+            #рамка
+            frame_with_boxes = results[0].plot(img=frame)
             st_frame.image(frame_with_boxes, channels="BGR")
-        else:
-            # если сеть еще не запускалась
-            st_frame.image(frame, channels="BGR")
-    cap.release()                                                 #освобождение ресурсов
+
+    cap.release()                       #освобождение ресурсов
 
     # вывод отчета
     if len(history_data) > 0:
