@@ -58,12 +58,11 @@ def generate_excel(df):
 st.title("Детектор медведей вблизи населенных пунктов")
 st.sidebar.header("Настройки")
 source_option = st.sidebar.selectbox("Источник видео", ("Загрузка видео", "Веб-камера"))
+result_placeholder = st.empty() #контейнер результата
 
 # отслеживание смены режима
 if 'last_source' not in st.session_state:
     st.session_state.last_source = source_option
-
-
 
 if 'history_data' not in st.session_state:
     st.session_state.history_data = []
@@ -161,6 +160,7 @@ if source_option == "Загрузка видео":
     # запуск обработки (лучше через явную кнопку, чтобы не стартовало "само" на каждом rerun)
     if uploaded_file is not None and st.button("Старт обработки"):
         reset_run_state()
+        result_placeholder.empty()
         st.session_state.filename = uploaded_file.name
 
         temp_path = save_uploaded_to_temp(uploaded_file)
@@ -176,6 +176,7 @@ elif source_option == "Веб-камера":
     # если выбрали камеру, создаем кнопку запуска
     if st.button("Включить камеру"):
         reset_run_state()  #чтобы очистить старые данные
+        result_placeholder.empty() #убрать кнопку скачать
         st.session_state.filename = "Веб-камера"
         cap = cv2.VideoCapture(0)                               # 0 это вебкамера
         is_camera = True
@@ -324,7 +325,7 @@ if cap is not None:
         st.session_state.active_cap = None
         st.session_state.processing = False
         st.session_state.show_result = True
-        st.rerun()
+        
         
         # сохранениЕ в json
         if not st.session_state.saved_to_history:
@@ -335,39 +336,41 @@ if cap is not None:
         # автосброс file_uploader и перезапуск
         if source_option == "Загрузка видео" and not is_camera:
             st.session_state.uploader_key += 1
-            st.rerun()
+            
+        st.rerun()
     
 # вывод отчета
-if (not st.session_state.processing) and st.session_state.show_result:
+with result_placeholder.container():
+    if (not st.session_state.processing) and st.session_state.show_result:
 
-    if st.session_state.stopped:
-        st.info("Обработка остановлена. Текущий результат:")
-    else:
-        st.success("Обработка завершена. Итоговый результат:")
+        if st.session_state.stopped:
+            st.info("Обработка остановлена. Текущий результат:")
+        else:
+            st.success("Обработка завершена. Итоговый результат:")
 
-    if st.session_state.max_bears_seen == 0:
-        st.warning("Медведей не найдено (0).")
-    else:
-        df = pd.DataFrame(st.session_state.history_data)
-        st.dataframe(df)                                        # показать таблицу
+        if st.session_state.max_bears_seen == 0:
+            st.warning("Медведей не найдено (0).")
+        else:
+            df = pd.DataFrame(st.session_state.history_data)
+            st.dataframe(df)                                        # показать таблицу
 
 
-        # Excel генерим только если данные изменились
-        key = len(st.session_state.history_data)  
-        if st.session_state.excel_key != key:
-            st.session_state.excel_data = None
-            st.session_state.excel_key = key
+            # Excel генерим только если данные изменились
+            key = len(st.session_state.history_data)  
+            if st.session_state.excel_key != key:
+                st.session_state.excel_data = None
+                st.session_state.excel_key = key
 
-        if st.session_state.excel_data is None:
-            with st.spinner("Готовлю Excel для скачивания..."):
-                st.session_state.excel_data = generate_excel(df)
-        #кнопка
-        st.download_button(
-            label="Скачать отчёт (Excel)",
-            data=st.session_state.excel_data,
-            file_name="report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            if st.session_state.excel_data is None:
+                with st.spinner("Готовлю Excel для скачивания..."):
+                    st.session_state.excel_data = generate_excel(df)
+            #кнопка
+            st.download_button(
+                label="Скачать отчёт (Excel)",
+                data=st.session_state.excel_data,
+                file_name="report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     
 
