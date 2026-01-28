@@ -56,10 +56,11 @@ def generate_excel(df):
 
 #интерфейс--------------------------
 st.title("Детектор медведей вблизи населенных пунктов")
+browse_slot = st.empty()
 st.sidebar.header("Настройки")
 source_option = st.sidebar.selectbox("Источник видео", ("Загрузка видео", "Веб-камера"))
-result_placeholder = st.empty() #контейнер результата
-
+result_placeholder = st.container() #контейнер результата
+# --- session_state ИНИЦИАЛИЗАЦИЯ (должна быть ДО file_uploader / key=...) 
 # отслеживание смены режима
 if 'last_source' not in st.session_state:
     st.session_state.last_source = source_option
@@ -109,6 +110,7 @@ if "max_bears_seen" not in st.session_state:
 if "show_result" not in st.session_state:
     st.session_state.show_result = False
 
+
 # если режим изменился очищаем старую статистику
 def reset_run_state():
     if st.session_state.active_cap is not None:
@@ -149,24 +151,28 @@ if st.session_state.last_source != source_option:
 cap = None
 is_camera = False
 
+uploaded_file = None 
+
 if source_option == "Загрузка видео":
-
-    uploaded_file = st.file_uploader(
-    "Загрузите видео",
-    type=["mp4", "avi"],
-    key=f"video_uploader_{st.session_state.uploader_key}",
-)
-
-    # запуск обработки (лучше через явную кнопку, чтобы не стартовало "само" на каждом rerun)
-    if uploaded_file is not None and st.button("Старт обработки"):
+    with  browse_slot.container():
+        uploaded_file = st.file_uploader(
+            "Загрузите видео",
+            type=["mp4", "avi"],
+            key=f"video_uploader_{st.session_state.uploader_key}",
+        )
+        start_clicked = st.button(
+            "Старт обработки",
+            disabled=(uploaded_file is None) or st.session_state.processing,
+            key="start_processing_btn",
+        )
+    if start_clicked:
         reset_run_state()
-        result_placeholder.empty()
         st.session_state.filename = uploaded_file.name
 
         temp_path = save_uploaded_to_temp(uploaded_file)
-        st.session_state.temp_video_path = temp_path  # чтобы потом удалить
+        st.session_state.temp_video_path = temp_path
         cap = cv2.VideoCapture(temp_path)
-        
+
         is_camera = False
         st.session_state.processing = True
         st.session_state.start_time = datetime.now()
