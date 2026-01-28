@@ -84,42 +84,73 @@ if 'video_duration' not in st.session_state:
 if 'saved_to_history' not in st.session_state:
     st.session_state.saved_to_history = False
 
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
+
+if "start_time" not in st.session_state:
+    st.session_state.start_time = None
+
+if "is_camera_mode" not in st.session_state:  
+    st.session_state.is_camera_mode = False
+
 # если режим изменился очищаем старую статистику
-if st.session_state.last_source != source_option:
+def reset_run_state():
     if st.session_state.active_cap is not None:
-        st.session_state.active_cap.release()                     #освобождаем камеру
+        st.session_state.active_cap.release()
         st.session_state.active_cap = None
     st.session_state.history_data = []
     st.session_state.stopped = False
     st.session_state.processing = False
-    st.session_state.saved_to_history = False  
-    st.session_state.last_source = source_option
+    st.session_state.saved_to_history = False
+    st.session_state.video_duration = 0
 
-cap = None                                                       #переменная файл
+
+cap = None
 is_camera = False
 
-#кнопка загрузки файла
 if source_option == "Загрузка видео":
-    uploaded_file = st.file_uploader("Загрузите видео", type=['mp4', 'avi'])
-    if uploaded_file is not None and not st.session_state.processing:
-        #сохранение файл во временную папку, потому что OpenCV не сможет его открыть
+
+    uploaded_file = st.file_uploader(
+    "Загрузите видео",
+    type=["mp4", "avi"],
+    key=f"video_uploader_{st.session_state.uploader_key}",
+)
+
+    # запуск обработки (лучше через явную кнопку, чтобы не стартовало "само" на каждом rerun)
+    if uploaded_file is not None and st.button("Старт обработки"):
+        reset_run_state()
         st.session_state.filename = uploaded_file.name
-        st.session_state.saved_to_history = False
-        tfile = tempfile.NamedTemporaryFile(delete=False) 
-        tfile.write(uploaded_file.read())
+
+        video_bytes = uploaded_file.getvalue()  # не "съедает" буфер как read()
+        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
+        tfile.write(video_bytes)
+        tfile.flush()
+
         cap = cv2.VideoCapture(tfile.name)
         is_camera = False
+        st.session_state.processing = True
+        st.session_state.start_time = datetime.now()
+        st.session_state.is_camera_mode = False
 
 elif source_option == "Веб-камера":
     # если выбрали камеру, создаем кнопку запуска
     if st.button("Включить камеру"):
+        reset_run_state()  #чтобы очистить старые данные
         st.session_state.filename = "Веб-камера"
         cap = cv2.VideoCapture(0)                               # 0 это вебкамера
         is_camera = True
         st.session_state.processing = True
-        st.session_state.history_data = []                      #очищаем при новом запуске
+        # st.session_state.history_data = []                      #очищаем при новом запуске
         st.session_state.stopped = False
-
+        st.session_state.start_time = datetime.now()
+        st.session_state.is_camera_mode = True
+# восстановить cap после rerun (например, при нажатии "Остановить")
+if cap is None and st.session_state.processing and st.session_state.active_cap is not None:
+    cap = st.session_state.active_cap
+    is_camera = st.session_state.is_camera_mode
 
 #проверка на файл
 if cap is not None:
@@ -128,6 +159,9 @@ if cap is not None:
 
     st_frame = st.empty()                                       #элемент на странице, куда будем выводить кадры
     stop_button = st.button("Остановить")
+
+    if stop_button:
+        st.session_state.stop_requested = True
     
     # Сброс при новом файле
     if not st.session_state.processing:
@@ -135,82 +169,104 @@ if cap is not None:
         st.session_state.processing = True
         st.session_state.stopped = False
 
-    # счетчик кадров
-    frame_count = 0 
-    last_logged_sec = -1                                       # чтобы не спамить одну секунду
-    start_time = datetime.now()  # Для подсчета длительности
 
-    #цикл модели-----------------------------------------
-    while cap.isOpened() and not stop_button:
-        
-        ret, frame = cap.read()
-        if not ret:
-            st.write("Видео закончилось")
-            st.session_state.stopped = False
-            break
-        frame_count += 1
-        #тамкод----------------------------------------------
-        #разная логика для времени реал тайм/видео
-        if is_camera:
-            video_time = datetime.now().strftime("%H:%M:%S")
-            current_sec = int(datetime.now().timestamp())  #метка для каждой секунды
-        else:
-            msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-            video_time = str(timedelta(milliseconds=int(msec))).split('.')[0]
-            current_sec = int(msec / 1000)
+        #обработка остановки ДО цикла
+    if st.session_state.stop_requested:
+        st.session_state.stopped = True
+        st_frame.empty()
 
-        #модель---------------------------------------------
-        if frame_count % 5 == 0:
-            
-            results = model.predict(
-                frame, 
-                conf=0.4,                               #уверенность
-                classes=[21],
-                iou=0.5,                                #убирает дубли
-                verbose=False                           #False чтобы терминал не спамил
-            )
+        if st.session_state.start_time is not None:
+            st.session_state.video_duration = int((datetime.now() - st.session_state.start_time).total_seconds())
 
-            # статистика
-            bears_count = len(results[0].boxes)
-            if bears_count > 0:
-                # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")                
-                if current_sec != last_logged_sec:
-                    #средняя уверенность
-                    confidences = [float(c) for c in results[0].boxes.conf]
-                    avg_conf = sum(confidences) / len(confidences)
-                   
-                    st.session_state.history_data.append({
-                        "Время": video_time,  
-                        "Медведей": bears_count,
-                        "Уверенность": f"{avg_conf:.2f}"
-                    })
-                    last_logged_sec = current_sec
-            #рамка
-            frame_with_boxes = results[0].plot(img=frame)
-            st_frame.image(frame_with_boxes, channels="BGR")
+        # сохранить в JSON
+        if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
+            total_bears = max(row["Медведей"] for row in st.session_state.history_data)
+            save_to_history(st.session_state.filename, total_bears, st.session_state.video_duration)
+            st.session_state.saved_to_history = True
 
-    if stop_button:
-        was_stopped = True
-        st_frame.empty()                                #убираем видео с экрана
+        cap.release()
+        st.session_state.active_cap = None
+        st.session_state.processing = False
+        st.session_state.stop_requested = False  # сброс флага
+
+        # автосброс file_uploader
+        if source_option == "Загрузка видео" and not is_camera:
+            st.session_state.uploader_key += 1
+            st.rerun()
    
-    st.session_state.video_duration = int((datetime.now() - start_time).total_seconds())
+    else:  #чтобы он не выполнялся при остановке
+        # счетчик кадров
+        frame_count = 0 
+        last_logged_sec = -1                                       # чтобы не спамить одну секунду
+        start_time = datetime.now()  # Для подсчета длительности
 
-    cap.release()                                       #освобождение ресурсов
-    st.session_state.active_cap = None
-    st.session_state.processing = False
+        #цикл модели-----------------------------------------
+        while cap.isOpened() and not stop_button:
+            
+            ret, frame = cap.read()
+            if not ret:
+                st.write("Видео закончилось")
+                st.session_state.stopped = False
+                break
+            frame_count += 1
+            #тамкод----------------------------------------------
+            #разная логика для времени реал тайм/видео
+            if is_camera:
+                video_time = datetime.now().strftime("%H:%M:%S")
+                current_sec = int(datetime.now().timestamp())  #метка для каждой секунды
+            else:
+                msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                video_time = str(timedelta(milliseconds=int(msec))).split('.')[0]
+                current_sec = int(msec / 1000)
+
+            #модель---------------------------------------------
+            if frame_count % 5 == 0:
+                
+                results = model.predict(
+                    frame, 
+                    conf=0.4,                               #уверенность
+                    classes=[21],
+                    iou=0.5,                                #убирает дубли
+                    verbose=False                           #False чтобы терминал не спамил
+                )
+
+                # статистика
+                bears_count = len(results[0].boxes)
+                if bears_count > 0:
+                    # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")                
+                    if current_sec != last_logged_sec:
+                        #средняя уверенность
+                        confidences = [float(c) for c in results[0].boxes.conf]
+                        avg_conf = sum(confidences) / len(confidences)
+                    
+                        st.session_state.history_data.append({
+                            "Время": video_time,  
+                            "Медведей": bears_count,
+                            "Уверенность": f"{avg_conf:.2f}"
+                        })
+                        last_logged_sec = current_sec
+                #рамка
+                frame_with_boxes = results[0].plot(img=frame)
+                st_frame.image(frame_with_boxes, channels="BGR")
+
+        st.session_state.video_duration = int((datetime.now() - st.session_state.start_time).total_seconds())        
+   
+
+        cap.release()                                       #освобождение ресурсов
+        st.session_state.active_cap = None
+        st.session_state.processing = False
+        
+        # сохранение в   json
+        if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
+            total_bears = max(row["Медведей"] for row in st.session_state.history_data)
+            save_to_history(st.session_state.filename, total_bears, st.session_state.video_duration)
+            st.session_state.saved_to_history = True
+
+        # автосброс file_uploader и перезапуск
+        if source_option == "Загрузка видео" and not is_camera:
+            st.session_state.uploader_key += 1
+            st.rerun()
     
-#история запросов
-if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
-    total_bears = max([row["Медведей"] for row in st.session_state.history_data])
-    save_to_history(
-        st.session_state.filename,  
-        total_bears, 
-        st.session_state.video_duration 
-    )
-    st.session_state.saved_to_history = True 
-
-
-
 # вывод отчета
 if len(st.session_state.history_data) > 0:
 
