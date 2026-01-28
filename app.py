@@ -4,6 +4,9 @@ import pandas as pd                                       #нужно для Exc
 from ultralytics import YOLO                              #предобученная модель 
 import tempfile                                           #тащит видео из рам на диск для opencv
 from datetime import timedelta, datetime                  #для времени обнаружения
+import json                                               #история запросов
+import os
+from io import BytesIO
 
 # python -m streamlit run app.py
 
@@ -14,6 +17,42 @@ def load_model():
     return model
 
 model = load_model()
+
+# ф-ия сохранения в историю запросов json
+def save_to_history(filename, total_bears, duration_sec):
+    history = []
+    
+    if os.path.exists("detection_history.json"):
+        with open("detection_history.json", 'r', encoding='utf-8') as f:
+            history = json.load(f)
+    
+    new_record = {
+        "дата_время": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+        "источник": filename,
+        "медведей_найдено": total_bears,
+        "длительность_сек": duration_sec
+    }
+    history.append(new_record)
+    
+    with open("detection_history.json", 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+#генерация отчета exel
+def generate_excel(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Обнаружения')
+        
+        # Автоматическая ширина колонок
+        worksheet = writer.sheets['Обнаружения']
+        for column in df:
+            column_width = max(df[column].astype(str).map(len).max(), len(column)) + 2
+            col_idx = df.columns.get_loc(column)
+            worksheet.column_dimensions[chr(65 + col_idx)].width = column_width
+    
+    output.seek(0)
+    return output.getvalue()
+
 
 #интерфейс--------------------------
 st.title("Детектор медведей вблизи населенных пунктов")
@@ -36,6 +75,15 @@ if 'stopped' not in st.session_state:
 if 'active_cap' not in st.session_state:  
     st.session_state.active_cap = None    
 
+if 'filename' not in st.session_state:
+    st.session_state.filename = ""
+
+if 'video_duration' not in st.session_state:
+    st.session_state.video_duration = 0
+
+if 'saved_to_history' not in st.session_state:
+    st.session_state.saved_to_history = False
+
 # если режим изменился очищаем старую статистику
 if st.session_state.last_source != source_option:
     if st.session_state.active_cap is not None:
@@ -44,6 +92,7 @@ if st.session_state.last_source != source_option:
     st.session_state.history_data = []
     st.session_state.stopped = False
     st.session_state.processing = False
+    st.session_state.saved_to_history = False  
     st.session_state.last_source = source_option
 
 cap = None                                                       #переменная файл
@@ -52,8 +101,10 @@ is_camera = False
 #кнопка загрузки файла
 if source_option == "Загрузка видео":
     uploaded_file = st.file_uploader("Загрузите видео", type=['mp4', 'avi'])
-    if uploaded_file is not None:
+    if uploaded_file is not None and not st.session_state.processing:
         #сохранение файл во временную папку, потому что OpenCV не сможет его открыть
+        st.session_state.filename = uploaded_file.name
+        st.session_state.saved_to_history = False
         tfile = tempfile.NamedTemporaryFile(delete=False) 
         tfile.write(uploaded_file.read())
         cap = cv2.VideoCapture(tfile.name)
@@ -62,6 +113,7 @@ if source_option == "Загрузка видео":
 elif source_option == "Веб-камера":
     # если выбрали камеру, создаем кнопку запуска
     if st.button("Включить камеру"):
+        st.session_state.filename = "Веб-камера"
         cap = cv2.VideoCapture(0)                               # 0 это вебкамера
         is_camera = True
         st.session_state.processing = True
@@ -86,6 +138,7 @@ if cap is not None:
     # счетчик кадров
     frame_count = 0 
     last_logged_sec = -1                                       # чтобы не спамить одну секунду
+    start_time = datetime.now()  # Для подсчета длительности
 
     #цикл модели-----------------------------------------
     while cap.isOpened() and not stop_button:
@@ -122,9 +175,14 @@ if cap is not None:
             if bears_count > 0:
                 # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")                
                 if current_sec != last_logged_sec:
+                    #средняя уверенность
+                    confidences = [float(c) for c in results[0].boxes.conf]
+                    avg_conf = sum(confidences) / len(confidences)
+                   
                     st.session_state.history_data.append({
                         "Время": video_time,  
-                        "Медведей": bears_count
+                        "Медведей": bears_count,
+                        "Уверенность": f"{avg_conf:.2f}"
                     })
                     last_logged_sec = current_sec
             #рамка
@@ -135,12 +193,25 @@ if cap is not None:
         was_stopped = True
         st_frame.empty()                                #убираем видео с экрана
    
+    st.session_state.video_duration = int((datetime.now() - start_time).total_seconds())
+
     cap.release()                                       #освобождение ресурсов
     st.session_state.active_cap = None
     st.session_state.processing = False
     
+#история запросов
+if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
+    total_bears = max([row["Медведей"] for row in st.session_state.history_data])
+    save_to_history(
+        st.session_state.filename,  
+        total_bears, 
+        st.session_state.video_duration 
+    )
+    st.session_state.saved_to_history = True 
 
-    # вывод отчета
+
+
+# вывод отчета
 if len(st.session_state.history_data) > 0:
 
     if st.session_state.stopped:
@@ -150,7 +221,30 @@ if len(st.session_state.history_data) > 0:
 
     df = pd.DataFrame(st.session_state.history_data)
     st.dataframe(df)                                       # показать таблицу
-        
-    # скачать CSV
-    csv = df.to_csv().encode('utf-8')
-    st.download_button("Скачать отчет", csv, "report.csv")
+
+    #отчет статистики 
+    excel_data = generate_excel(df)
+    st.download_button(
+        label="Скачать отчет (Excel)",
+        data=excel_data,
+        file_name="report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# сайдбар история запросов
+st.sidebar.header("История запросов")
+if os.path.exists("detection_history.json"):
+    with open("detection_history.json", 'r', encoding='utf-8') as f:
+        history = json.load(f)
+    
+    if len(history) > 0:
+        history_df = pd.DataFrame(history)
+        st.sidebar.dataframe(history_df, width='stretch')
+        st.sidebar.metric("Всего анализов", len(history))
+        successful_detections = len(history_df[history_df["медведей_найдено"] > 0])
+        st.sidebar.metric("Успешных обнаружений", successful_detections)
+    else:
+        st.sidebar.info("История пуста")
+else:
+    st.sidebar.info("История пуста")
+
