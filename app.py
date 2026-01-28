@@ -63,6 +63,8 @@ source_option = st.sidebar.selectbox("Источник видео", ("Загру
 if 'last_source' not in st.session_state:
     st.session_state.last_source = source_option
 
+
+
 if 'history_data' not in st.session_state:
     st.session_state.history_data = []
 
@@ -107,6 +109,10 @@ def reset_run_state():
     st.session_state.saved_to_history = False
     st.session_state.video_duration = 0
 
+# если режим изменился — очищаем старую статистику
+if st.session_state.last_source != source_option:
+    reset_run_state()
+    st.session_state.last_source = source_option
 
 cap = None
 is_camera = False
