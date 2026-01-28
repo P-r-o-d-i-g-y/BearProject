@@ -103,11 +103,25 @@ def reset_run_state():
     if st.session_state.active_cap is not None:
         st.session_state.active_cap.release()
         st.session_state.active_cap = None
+    
+    # удалить предыдущий temp-файл, если был
+    temp_path = st.session_state.get("temp_video_path")
+    if temp_path and os.path.exists(temp_path):
+        os.remove(temp_path)
+    st.session_state.temp_video_path = None
+    
     st.session_state.history_data = []
     st.session_state.stopped = False
     st.session_state.processing = False
     st.session_state.saved_to_history = False
     st.session_state.video_duration = 0
+
+def save_uploaded_to_temp(uploaded_file):
+            suffix = os.path.splitext(uploaded_file.name)[1].lower()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tfile:
+                # getbuffer() — без лишней копии huge-bytes в переменную
+                tfile.write(uploaded_file.getbuffer())
+                return tfile.name
 
 # если режим изменился — очищаем старую статистику
 if st.session_state.last_source != source_option:
@@ -130,12 +144,10 @@ if source_option == "Загрузка видео":
         reset_run_state()
         st.session_state.filename = uploaded_file.name
 
-        video_bytes = uploaded_file.getvalue()  # не "съедает" буфер как read()
-        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
-        tfile.write(video_bytes)
-        tfile.flush()
-
-        cap = cv2.VideoCapture(tfile.name)
+        temp_path = save_uploaded_to_temp(uploaded_file)
+        st.session_state.temp_video_path = temp_path  # чтобы потом удалить
+        cap = cv2.VideoCapture(temp_path)
+        
         is_camera = False
         st.session_state.processing = True
         st.session_state.start_time = datetime.now()
@@ -191,6 +203,11 @@ if cap is not None:
             st.session_state.saved_to_history = True
 
         cap.release()
+        # удалить временный файл (только для режима "Загрузка видео")
+        temp_path = st.session_state.get("temp_video_path")
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        st.session_state.temp_video_path = None
         st.session_state.active_cap = None
         st.session_state.processing = False
         st.session_state.stop_requested = False  # сброс флага
@@ -209,12 +226,18 @@ if cap is not None:
         #цикл модели-----------------------------------------
         while cap.isOpened() and not stop_button:
             
-            ret, frame = cap.read()
+            ret = cap.grab()
             if not ret:
                 st.write("Видео закончилось")
-                st.session_state.stopped = False
                 break
+            
             frame_count += 1
+            if frame_count % 5 != 0:
+                continue  # кадр пропускаем БЕЗ декодирования
+
+            ret, frame = cap.retrieve()
+            if not ret:
+                break
             #тамкод----------------------------------------------
             #разная логика для времени реал тайм/видео
             if is_camera:
@@ -226,39 +249,52 @@ if cap is not None:
                 current_sec = int(msec / 1000)
 
             #модель---------------------------------------------
-            if frame_count % 5 == 0:
+            
                 
-                results = model.predict(
-                    frame, 
-                    conf=0.4,                               #уверенность
-                    classes=[21],
-                    iou=0.5,                                #убирает дубли
-                    verbose=False                           #False чтобы терминал не спамил
-                )
+            results = model.predict(
+                frame, 
+                conf=0.4,                               #уверенность
+                classes=[21],
+                iou=0.5,                                #убирает дубли
+                verbose=False                           #False чтобы терминал не спамил
+            )
 
-                # статистика
-                bears_count = len(results[0].boxes)
-                if bears_count > 0:
-                    # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")                
-                    if current_sec != last_logged_sec:
-                        #средняя уверенность
-                        confidences = [float(c) for c in results[0].boxes.conf]
-                        avg_conf = sum(confidences) / len(confidences)
+            # статистика
+            bears_count = len(results[0].boxes)
+            if bears_count > 0:
+                # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")                
+                if current_sec != last_logged_sec:
+                    #средняя уверенность
+                    confidences = [float(c) for c in results[0].boxes.conf]
+                    avg_conf = sum(confidences) / len(confidences)
                     
-                        st.session_state.history_data.append({
-                            "Время": video_time,  
-                            "Медведей": bears_count,
-                            "Уверенность": f"{avg_conf:.2f}"
-                        })
-                        last_logged_sec = current_sec
-                #рамка
-                frame_with_boxes = results[0].plot(img=frame)
-                st_frame.image(frame_with_boxes, channels="BGR")
+                    st.session_state.history_data.append({
+                        "Время": video_time,  
+                        "Медведей": bears_count,
+                        "Уверенность": f"{avg_conf:.2f}"
+                    })
+                    last_logged_sec = current_sec
+            #рамка
+            frame_with_boxes = results[0].plot(img=frame)
+            # уменьшение кадра перед отправкой в браузер (ускоряет Streamlit)
+            max_w = 960
+            h, w = frame_with_boxes.shape[:2]
+            if w > max_w:
+                scale = max_w / w
+                frame_with_boxes = cv2.resize(frame_with_boxes, (max_w, int(h * scale)))
+                
+            st_frame.image(frame_with_boxes, channels="BGR")
 
         st.session_state.video_duration = int((datetime.now() - st.session_state.start_time).total_seconds())        
    
 
         cap.release()                                       #освобождение ресурсов
+        
+        temp_path = st.session_state.get("temp_video_path")
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        st.session_state.temp_video_path = None
         st.session_state.active_cap = None
         st.session_state.processing = False
         
