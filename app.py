@@ -98,6 +98,12 @@ if "start_time" not in st.session_state:
 if "is_camera_mode" not in st.session_state:  
     st.session_state.is_camera_mode = False
 
+if "excel_data" not in st.session_state:
+    st.session_state.excel_data = None
+
+if "excel_key" not in st.session_state:
+    st.session_state.excel_key = None
+
 # если режим изменился очищаем старую статистику
 def reset_run_state():
     if st.session_state.active_cap is not None:
@@ -115,6 +121,9 @@ def reset_run_state():
     st.session_state.processing = False
     st.session_state.saved_to_history = False
     st.session_state.video_duration = 0
+    st.session_state.excel_key = None
+    st.session_state.excel_data = None
+
 
 def save_uploaded_to_temp(uploaded_file):
             suffix = os.path.splitext(uploaded_file.name)[1].lower()
@@ -212,10 +221,12 @@ if cap is not None:
         st.session_state.processing = False
         st.session_state.stop_requested = False  # сброс флага
 
-        # автосброс file_uploader
+        # автосброс file_uploader только для режима "Загрузка видео"
         if source_option == "Загрузка видео" and not is_camera:
             st.session_state.uploader_key += 1
-            st.rerun()
+
+        # rerun всегда, чтобы UI обновился и кнопка исчезла сразу
+        st.rerun()
    
     else:  #чтобы он не выполнялся при остановке
         # счетчик кадров
@@ -320,14 +331,25 @@ if len(st.session_state.history_data) > 0:
     df = pd.DataFrame(st.session_state.history_data)
     st.dataframe(df)                                       # показать таблицу
 
-    #отчет статистики 
-    excel_data = generate_excel(df)
+    # ✅ Excel генерим только если данные изменились
+    key = len(st.session_state.history_data)  # достаточно, т.к. ты только append'ишь
+    if st.session_state.excel_key != key:
+        st.session_state.excel_data = None
+        st.session_state.excel_key = key
+
+    if st.session_state.excel_data is None:
+        with st.spinner("Готовлю Excel для скачивания..."):
+            st.session_state.excel_data = generate_excel(df)
+
+    # ✅ ОДНА кнопка
     st.download_button(
-        label="Скачать отчет (Excel)",
-        data=excel_data,
+        label="Скачать отчёт (Excel)",
+        data=st.session_state.excel_data,
         file_name="report.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+    
 
 # сайдбар история запросов
 st.sidebar.header("История запросов")

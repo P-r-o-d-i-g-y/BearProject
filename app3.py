@@ -1,31 +1,30 @@
-import streamlit as st
-import cv2
-import pandas as pd
-from ultralytics import YOLO
-import tempfile
-from datetime import timedelta, datetime
-import json
+import streamlit as st                                    #заменяет htlml css js
+import cv2                                                #достает картинки для ии (opencv)
+import pandas as pd                                       #нужно для Excel
+from ultralytics import YOLO                              #предобученная модель 
+import tempfile                                           #тащит видео из рам на диск для opencv
+from datetime import timedelta, datetime                  #для времени обнаружения
+import json                                               #история запросов
 import os
 from io import BytesIO
 
-# --- НАСТРОЙКИ СТРАНИЦЫ ---
-st.set_page_config(page_title="Bear Detector", layout="wide")
+# python -m streamlit run app.py
 
-@st.cache_resource
+@st.cache_resource                                          #чтобы модель не загружалась заново и осталась в памяти
+# загрузка модели с предобучением
 def load_model():
-    return YOLO('yolov8s.pt')
+    model = YOLO('yolov8s.pt')                              
+    return model
 
 model = load_model()
 
-# --- ФУНКЦИИ ---
+# ф-ия сохранения в историю запросов json
 def save_to_history(filename, total_bears, duration_sec):
     history = []
+    
     if os.path.exists("detection_history.json"):
         with open("detection_history.json", 'r', encoding='utf-8') as f:
-            try:
-                history = json.load(f)
-            except json.JSONDecodeError:
-                history = []
+            history = json.load(f)
     
     new_record = {
         "дата_время": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
@@ -38,155 +37,290 @@ def save_to_history(filename, total_bears, duration_sec):
     with open("detection_history.json", 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
+#генерация отчета exel
 def generate_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Обнаружения')
+        
+        # Автоматическая ширина колонок
         worksheet = writer.sheets['Обнаружения']
         for column in df:
             column_width = max(df[column].astype(str).map(len).max(), len(column)) + 2
             col_idx = df.columns.get_loc(column)
             worksheet.column_dimensions[chr(65 + col_idx)].width = column_width
+    
     output.seek(0)
     return output.getvalue()
 
-# --- ИНИЦИАЛИЗАЦИЯ STATE ---
-if 'history_data' not in st.session_state:
-    st.session_state.history_data = []
-if 'uploader_key' not in st.session_state:
-    st.session_state.uploader_key = 0
-if 'processing_active' not in st.session_state:
-    st.session_state.processing_active = False
 
-# --- ИНТЕРФЕЙС ---
-st.title("Детектор медведей")
+#интерфейс--------------------------
+st.title("Детектор медведей вблизи населенных пунктов")
 st.sidebar.header("Настройки")
 source_option = st.sidebar.selectbox("Источник видео", ("Загрузка видео", "Веб-камера"))
 
-# Сброс при смене режима
+# отслеживание смены режима
 if 'last_source' not in st.session_state:
     st.session_state.last_source = source_option
-if st.session_state.last_source != source_option:
+
+
+
+if 'history_data' not in st.session_state:
     st.session_state.history_data = []
-    st.session_state.processing_active = False
+
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
+
+if 'stopped' not in st.session_state:
+    st.session_state.stopped = False
+
+if 'active_cap' not in st.session_state:  
+    st.session_state.active_cap = None    
+
+if 'filename' not in st.session_state:
+    st.session_state.filename = ""
+
+if 'video_duration' not in st.session_state:
+    st.session_state.video_duration = 0
+
+if 'saved_to_history' not in st.session_state:
+    st.session_state.saved_to_history = False
+
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
+
+if "start_time" not in st.session_state:
+    st.session_state.start_time = None
+
+if "is_camera_mode" not in st.session_state:  
+    st.session_state.is_camera_mode = False
+
+# если режим изменился очищаем старую статистику
+def reset_run_state():
+    if st.session_state.active_cap is not None:
+        st.session_state.active_cap.release()
+        st.session_state.active_cap = None
+    
+    # удалить предыдущий temp-файл, если был
+    temp_path = st.session_state.get("temp_video_path")
+    if temp_path and os.path.exists(temp_path):
+        os.remove(temp_path)
+    st.session_state.temp_video_path = None
+    
+    st.session_state.history_data = []
+    st.session_state.stopped = False
+    st.session_state.processing = False
+    st.session_state.saved_to_history = False
+    st.session_state.video_duration = 0
+
+def save_uploaded_to_temp(uploaded_file):
+            suffix = os.path.splitext(uploaded_file.name)[1].lower()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tfile:
+                # getbuffer() — без лишней копии huge-bytes в переменную
+                tfile.write(uploaded_file.getbuffer())
+                return tfile.name
+
+# если режим изменился — очищаем старую статистику
+if st.session_state.last_source != source_option:
+    reset_run_state()
     st.session_state.last_source = source_option
 
 cap = None
-temp_path = None
 is_camera = False
 
-# Логика выбора источника
 if source_option == "Загрузка видео":
-    # ВОТ ОНА, ВАЖНАЯ СТРОЧКА: key обновляется, позволяя загружать то же видео заново
-    uploaded_file = st.file_uploader(
-        "Загрузите видео", 
-        type=["mp4", "avi"], 
-        key=f"uploader_{st.session_state.uploader_key}"
-    )
 
-    if uploaded_file is not None:
-        # Кнопка старта, чтобы не запускать обработку сразу при выборе файла (опционально)
-        if st.button("Старт обработки") or st.session_state.processing_active:
-             # Сохраняем файл во временную папку
-            tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
-            tfile.write(uploaded_file.getvalue())
-            tfile.flush() # Важно сбросить буфер на диск
-            temp_path = tfile.name
-            
-            cap = cv2.VideoCapture(temp_path)
-            st.session_state.filename = uploaded_file.name
-            st.session_state.processing_active = True
-            is_camera = False
+    uploaded_file = st.file_uploader(
+    "Загрузите видео",
+    type=["mp4", "avi"],
+    key=f"video_uploader_{st.session_state.uploader_key}",
+)
+
+    # запуск обработки (лучше через явную кнопку, чтобы не стартовало "само" на каждом rerun)
+    if uploaded_file is not None and st.button("Старт обработки"):
+        reset_run_state()
+        st.session_state.filename = uploaded_file.name
+
+        temp_path = save_uploaded_to_temp(uploaded_file)
+        st.session_state.temp_video_path = temp_path  # чтобы потом удалить
+        cap = cv2.VideoCapture(temp_path)
+        
+        is_camera = False
+        st.session_state.processing = True
+        st.session_state.start_time = datetime.now()
+        st.session_state.is_camera_mode = False
 
 elif source_option == "Веб-камера":
-    if st.button("Включить камеру") or st.session_state.processing_active:
-        cap = cv2.VideoCapture(0)
+    # если выбрали камеру, создаем кнопку запуска
+    if st.button("Включить камеру"):
+        reset_run_state()  #чтобы очистить старые данные
         st.session_state.filename = "Веб-камера"
-        st.session_state.processing_active = True
+        cap = cv2.VideoCapture(0)                               # 0 это вебкамера
         is_camera = True
+        st.session_state.processing = True
+        # st.session_state.history_data = []                      #очищаем при новом запуске
+        st.session_state.stopped = False
+        st.session_state.start_time = datetime.now()
+        st.session_state.is_camera_mode = True
+# восстановить cap после rerun (например, при нажатии "Остановить")
+if cap is None and st.session_state.processing and st.session_state.active_cap is not None:
+    cap = st.session_state.active_cap
+    is_camera = st.session_state.is_camera_mode
 
-# --- ОБРАБОТКА ВИДЕО ---
-# Мы входим сюда только если cap создан (то есть нажали кнопку или процесс идет)
-if cap is not None and cap.isOpened():
+#проверка на файл
+if cap is not None:
     
-    st_frame = st.empty()  # Плейсхолдер для видео
-    stop_button = st.button("Остановить") # Кнопка стоп рисуется ДО цикла
+    st.session_state.active_cap = cap
+
+    st_frame = st.empty()                                       #элемент на странице, куда будем выводить кадры
+    stop_button = st.button("Остановить")
 
     if stop_button:
-        # Если нажали стоп - просто прерываем, Streamlit сам перезагрузит скрипт
-        st.session_state.processing_active = False
-        cap.release()
-        st.rerun()
-
-    st.session_state.history_data = [] # Очищаем старую статистику перед новым прогоном
+        st.session_state.stop_requested = True
     
-    frame_count = 0
-    last_logged_sec = -1
-    start_time_proc = datetime.now()
+    # Сброс при новом файле
+    if not st.session_state.processing:
+        st.session_state.history_data = []
+        st.session_state.processing = True
+        st.session_state.stopped = False
 
-    # --- ГЛАВНЫЙ ЦИКЛ (Как в старом коде - БЫСТРЫЙ) ---
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            # Видео закончилось
-            break
 
-        frame_count += 1
-        
-        # Модель (каждый 5-й кадр для скорости)
-        if frame_count % 5 == 0:
-            results = model.predict(frame, conf=0.4, classes=[21], iou=0.5, verbose=False)
+        #обработка остановки ДО цикла
+    if st.session_state.stop_requested:
+        st.session_state.stopped = True
+        st_frame.empty()
+
+        if st.session_state.start_time is not None:
+            st.session_state.video_duration = int((datetime.now() - st.session_state.start_time).total_seconds())
+
+        # сохранить в JSON
+        if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
+            total_bears = max(row["Медведей"] for row in st.session_state.history_data)
+            save_to_history(st.session_state.filename, total_bears, st.session_state.video_duration)
+            st.session_state.saved_to_history = True
+
+        cap.release()
+        # удалить временный файл (только для режима "Загрузка видео")
+        temp_path = st.session_state.get("temp_video_path")
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        st.session_state.temp_video_path = None
+        st.session_state.active_cap = None
+        st.session_state.processing = False
+        st.session_state.stop_requested = False  # сброс флага
+
+        # автосброс file_uploader
+        if source_option == "Загрузка видео" and not is_camera:
+            st.session_state.uploader_key += 1
+            st.rerun()
+   
+    else:  #чтобы он не выполнялся при остановке
+        # счетчик кадров
+        frame_count = 0 
+        last_logged_sec = -1                                       # чтобы не спамить одну секунду
+        start_time = datetime.now()  # Для подсчета длительности
+
+        #цикл модели-----------------------------------------
+        while cap.isOpened() and not stop_button:
             
-            # Статистика
+            ret = cap.grab()
+            if not ret:
+                st.write("Видео закончилось")
+                break
+            
+            frame_count += 1
+            if frame_count % 5 != 0:
+                continue  # кадр пропускаем БЕЗ декодирования
+
+            ret, frame = cap.retrieve()
+            if not ret:
+                break
+            #тамкод----------------------------------------------
+            #разная логика для времени реал тайм/видео
+            if is_camera:
+                video_time = datetime.now().strftime("%H:%M:%S")
+                current_sec = int(datetime.now().timestamp())  #метка для каждой секунды
+            else:
+                msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                video_time = str(timedelta(milliseconds=int(msec))).split('.')[0]
+                current_sec = int(msec / 1000)
+
+            #модель---------------------------------------------
+            
+                
+            results = model.predict(
+                frame, 
+                conf=0.4,                               #уверенность
+                classes=[21],
+                iou=0.5,                                #убирает дубли
+                verbose=False                           #False чтобы терминал не спамил
+            )
+
+            # статистика
             bears_count = len(results[0].boxes)
             if bears_count > 0:
-                if is_camera:
-                    current_sec = int(datetime.now().timestamp())
-                    video_time = datetime.now().strftime("%H:%M:%S")
-                else:
-                    msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-                    current_sec = int(msec / 1000)
-                    video_time = str(timedelta(milliseconds=int(msec))).split('.')[0]
-
+                # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")                
                 if current_sec != last_logged_sec:
+                    #средняя уверенность
                     confidences = [float(c) for c in results[0].boxes.conf]
                     avg_conf = sum(confidences) / len(confidences)
+                    
                     st.session_state.history_data.append({
-                        "Время": video_time,
+                        "Время": video_time,  
                         "Медведей": bears_count,
                         "Уверенность": f"{avg_conf:.2f}"
                     })
                     last_logged_sec = current_sec
-
-            # Рисуем
+            #рамка
             frame_with_boxes = results[0].plot(img=frame)
+            # уменьшение кадра перед отправкой в браузер (ускоряет Streamlit)
+            max_w = 960
+            h, w = frame_with_boxes.shape[:2]
+            if w > max_w:
+                scale = max_w / w
+                frame_with_boxes = cv2.resize(frame_with_boxes, (max_w, int(h * scale)))
+                
             st_frame.image(frame_with_boxes, channels="BGR")
 
-    # --- ЗАВЕРШЕНИЕ ОБРАБОТКИ ---
-    cap.release()
-    st.session_state.processing_active = False # Снимаем флаг активности
-    
-    # Расчет длительности
-    duration = int((datetime.now() - start_time_proc).total_seconds())
-    
-    # Сохраняем в историю JSON
-    if len(st.session_state.history_data) > 0:
-        total_bears = max(row["Медведей"] for row in st.session_state.history_data)
-        save_to_history(st.session_state.filename, total_bears, duration)
+        st.session_state.video_duration = int((datetime.now() - st.session_state.start_time).total_seconds())        
+   
 
-    # ВАЖНО: Обновляем ключ загрузчика, чтобы поле очистилось и можно было залить то же видео
-    if not is_camera:
-        st.session_state.uploader_key += 1
-    
-    st.success("Обработка завершена!")
-    st.rerun() # Перезагружаем страницу, чтобы обновить интерфейс и показать таблицу
+        cap.release()                                       #освобождение ресурсов
+        
+        temp_path = st.session_state.get("temp_video_path")
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        st.session_state.temp_video_path = None
+        st.session_state.active_cap = None
+        st.session_state.processing = False
+        
+        # сохранение в   json
+        if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
+            total_bears = max(row["Медведей"] for row in st.session_state.history_data)
+            save_to_history(st.session_state.filename, total_bears, st.session_state.video_duration)
+            st.session_state.saved_to_history = True
 
-# --- ВЫВОД РЕЗУЛЬТАТОВ (ПОСЛЕ ЦИКЛА) ---
-if len(st.session_state.history_data) > 0 and not st.session_state.processing_active:
-    st.write("Результаты последнего анализа:")
+        # автосброс file_uploader и перезапуск
+        if source_option == "Загрузка видео" and not is_camera:
+            st.session_state.uploader_key += 1
+            st.rerun()
+    
+# вывод отчета
+if len(st.session_state.history_data) > 0:
+
+    if st.session_state.stopped:
+        st.info("Обработка остановлена. Текущий результат:")
+    else:
+        st.success("Обработка завершена. Итоговый результат:")
+
     df = pd.DataFrame(st.session_state.history_data)
-    st.dataframe(df)
-    
+    st.dataframe(df)                                       # показать таблицу
+
+    #отчет статистики 
     excel_data = generate_excel(df)
     st.download_button(
         label="Скачать отчет (Excel)",
@@ -195,16 +329,20 @@ if len(st.session_state.history_data) > 0 and not st.session_state.processing_ac
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# --- БОКОВАЯ ПАНЕЛЬ ИСТОРИИ ---
-st.sidebar.divider()
+# сайдбар история запросов
 st.sidebar.header("История запросов")
 if os.path.exists("detection_history.json"):
     with open("detection_history.json", 'r', encoding='utf-8') as f:
-        try:
-            history = json.load(f)
-            if history:
-                history_df = pd.DataFrame(history)
-                st.sidebar.dataframe(history_df, use_container_width=True)
-                st.sidebar.metric("Всего анализов", len(history))
-        except:
-            st.sidebar.info("Ошибка чтения истории")
+        history = json.load(f)
+    
+    if len(history) > 0:
+        history_df = pd.DataFrame(history)
+        st.sidebar.dataframe(history_df, width='stretch')
+        st.sidebar.metric("Всего анализов", len(history))
+        successful_detections = len(history_df[history_df["медведей_найдено"] > 0])
+        st.sidebar.metric("Успешных обнаружений", successful_detections)
+    else:
+        st.sidebar.info("История пуста")
+else:
+    st.sidebar.info("История пуста")
+
