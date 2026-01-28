@@ -104,6 +104,12 @@ if "excel_data" not in st.session_state:
 if "excel_key" not in st.session_state:
     st.session_state.excel_key = None
 
+if "max_bears_seen" not in st.session_state:
+    st.session_state.max_bears_seen = 0
+
+if "show_result" not in st.session_state:
+    st.session_state.show_result = False
+
 # если режим изменился очищаем старую статистику
 def reset_run_state():
     if st.session_state.active_cap is not None:
@@ -117,13 +123,16 @@ def reset_run_state():
     st.session_state.temp_video_path = None
     
     st.session_state.history_data = []
+    st.session_state.max_bears_seen = 0
     st.session_state.stopped = False
     st.session_state.processing = False
     st.session_state.saved_to_history = False
     st.session_state.video_duration = 0
     st.session_state.excel_key = None
     st.session_state.excel_data = None
-
+    st.session_state.start_time = None
+    st.session_state.stop_requested = False
+    st.session_state.show_result = False
 
 def save_uploaded_to_temp(uploaded_file):
             suffix = os.path.splitext(uploaded_file.name)[1].lower()
@@ -136,6 +145,7 @@ def save_uploaded_to_temp(uploaded_file):
 if st.session_state.last_source != source_option:
     reset_run_state()
     st.session_state.last_source = source_option
+    st.rerun()
 
 cap = None
 is_camera = False
@@ -205,9 +215,9 @@ if cap is not None:
         if st.session_state.start_time is not None:
             st.session_state.video_duration = int((datetime.now() - st.session_state.start_time).total_seconds())
 
-        # сохранить в JSON
-        if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
-            total_bears = max(row["Медведей"] for row in st.session_state.history_data)
+        # сохраниТЬ в JSON
+        if not st.session_state.saved_to_history:
+            total_bears = st.session_state.max_bears_seen  # будет 0 если не нашли
             save_to_history(st.session_state.filename, total_bears, st.session_state.video_duration)
             st.session_state.saved_to_history = True
 
@@ -225,6 +235,8 @@ if cap is not None:
         if source_option == "Загрузка видео" and not is_camera:
             st.session_state.uploader_key += 1
 
+        st.session_state.show_result = True
+        # st.session_state.stopped = False
         # rerun всегда, чтобы UI обновился и кнопка исчезла сразу
         st.rerun()
    
@@ -272,6 +284,9 @@ if cap is not None:
 
             # статистика
             bears_count = len(results[0].boxes)
+            if bears_count > st.session_state.max_bears_seen:
+                st.session_state.max_bears_seen = bears_count
+            
             if bears_count > 0:
                 # print(f"Кадр {frame_count}: найдено {bears_count} объектов. Уверенности: {[round(float(c), 2) for c in results[0].boxes.conf]}")                
                 if current_sec != last_logged_sec:
@@ -308,10 +323,12 @@ if cap is not None:
         st.session_state.temp_video_path = None
         st.session_state.active_cap = None
         st.session_state.processing = False
+        st.session_state.show_result = True
+        st.rerun()
         
-        # сохранение в   json
-        if len(st.session_state.history_data) > 0 and not st.session_state.saved_to_history:
-            total_bears = max(row["Медведей"] for row in st.session_state.history_data)
+        # сохранениЕ в json
+        if not st.session_state.saved_to_history:
+            total_bears = st.session_state.max_bears_seen
             save_to_history(st.session_state.filename, total_bears, st.session_state.video_duration)
             st.session_state.saved_to_history = True
 
@@ -321,33 +338,36 @@ if cap is not None:
             st.rerun()
     
 # вывод отчета
-if len(st.session_state.history_data) > 0:
+if (not st.session_state.processing) and st.session_state.show_result:
 
     if st.session_state.stopped:
         st.info("Обработка остановлена. Текущий результат:")
     else:
         st.success("Обработка завершена. Итоговый результат:")
 
-    df = pd.DataFrame(st.session_state.history_data)
-    st.dataframe(df)                                       # показать таблицу
+    if st.session_state.max_bears_seen == 0:
+        st.warning("Медведей не найдено (0).")
+    else:
+        df = pd.DataFrame(st.session_state.history_data)
+        st.dataframe(df)                                        # показать таблицу
 
-    # ✅ Excel генерим только если данные изменились
-    key = len(st.session_state.history_data)  # достаточно, т.к. ты только append'ишь
-    if st.session_state.excel_key != key:
-        st.session_state.excel_data = None
-        st.session_state.excel_key = key
 
-    if st.session_state.excel_data is None:
-        with st.spinner("Готовлю Excel для скачивания..."):
-            st.session_state.excel_data = generate_excel(df)
+        # Excel генерим только если данные изменились
+        key = len(st.session_state.history_data)  
+        if st.session_state.excel_key != key:
+            st.session_state.excel_data = None
+            st.session_state.excel_key = key
 
-    # ✅ ОДНА кнопка
-    st.download_button(
-        label="Скачать отчёт (Excel)",
-        data=st.session_state.excel_data,
-        file_name="report.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        if st.session_state.excel_data is None:
+            with st.spinner("Готовлю Excel для скачивания..."):
+                st.session_state.excel_data = generate_excel(df)
+        #кнопка
+        st.download_button(
+            label="Скачать отчёт (Excel)",
+            data=st.session_state.excel_data,
+            file_name="report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     
 
