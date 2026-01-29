@@ -183,7 +183,7 @@ elif source_option == "Веб-камера":
         #убирание старых данных
         result_placeholder.empty() #убрать кнопку скачать
         st.session_state.filename = "Веб-камера"
-        cap = cv2.VideoCapture(0)   #0 - камера ноута                            # 0 это вебкамера
+        cap = cv2.VideoCapture(0)   #0 - камера ноута
         is_camera = True
         st.session_state.processing = True
         st.session_state.stopped = False
