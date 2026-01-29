@@ -73,9 +73,6 @@ if "max_bears_seen" not in st.session_state:
 if "show_result" not in st.session_state:                  #чтобы кнопка скачать была после обработки
     st.session_state.show_result = False
 
-if "cam_info" in st.session_state:
-    st.sidebar.write(st.session_state.cam_info)
-
 # функции
 # ф-ия сохранения в историю запросов json
 def save_to_history(filename, total_bears, duration_sec):
@@ -184,48 +181,24 @@ if source_option == "Загрузка видео":
         st.session_state.is_camera_mode = False
 #блок вебки
 elif source_option == "Веб-камера":
-    camera_clicked = st.button(
-        "Включить камеру",
-        disabled=st.session_state.processing,
-        key="start_camera_btn",
-    )
-    if camera_clicked:
-        result_placeholder.empty()#убрать кнопку скачать
+    if st.button("Включить камеру"):
+        result_placeholder.empty()
         reset_run_state() 
         #убирание старых данных
+        result_placeholder.empty() #убрать кнопку скачать
         st.session_state.filename = "Веб-камера"
-        
+        cap = cv2.VideoCapture(0)   #0 - камера ноута
+        is_camera = True
         st.session_state.processing = True
         st.session_state.stopped = False
-        st.session_state.stop_requested = False
         st.session_state.start_time = datetime.now() #запуск обработки
         st.session_state.is_camera_mode = True
-        is_camera = True
-
-        cap = cv2.VideoCapture(0)  #0 - камера ноута
-        # st.session_state.active_cap = cap
-        
-        # попросим MJPG — часто только так даются 720p/1080p на USB/ноутбуках
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-
-        # прогрев
-        for _ in range(10):
-            cap.read()
-        ok, test_frame = cap.read()
-        # проверка что реально применилось
-        # st.session_state.cam_info = {
-        #     "backend": cap.getBackendName() if hasattr(cap, "getBackendName") else "n/a",
-        #     "opened": cap.isOpened(),
-        #     "w": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        #     "h": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        #     "fps": cap.get(cv2.CAP_PROP_FPS),
-        # }
-
-        st.session_state.active_cap = cap
-        st.rerun()
+        st.write("backend:", cap.getBackendName() if hasattr(cap, "getBackendName") else "n/a")
+        st.write("opened:", cap.isOpened())
+        st.write("w,h,fps:",
+            cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+            cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+            cap.get(cv2.CAP_PROP_FPS))
 
 # !восстановить cap после rerun (чтобы убрать камеру и удалить temp на диске, но сохранить статистику)
 if cap is None and st.session_state.processing and st.session_state.active_cap is not None:
@@ -296,11 +269,9 @@ if cap is not None: #проверка видео потока
             if frame_count % 5 != 0:
                 continue  # кадр пропускаем без декодирования
 
-            
             ret, frame = cap.retrieve()
             if not ret:
                 break
-            
             #тамкод
             #разная логика для времени реал тайм/видео
             if is_camera:
