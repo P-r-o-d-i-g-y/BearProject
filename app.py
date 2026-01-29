@@ -131,6 +131,8 @@ def reset_run_state():
     st.session_state.excel_data = None
     st.session_state.start_time = None
     st.session_state.stop_requested = False
+    # убрать старый результат из UI
+    result_placeholder.empty()
     st.session_state.show_result = False
 
 # ф-ия из рам в диск, чтобы OpenCV его читал
@@ -166,6 +168,7 @@ if source_option == "Загрузка видео":
             key="start_processing_btn",
         )
     if start_clicked:
+        result_placeholder.empty()
         reset_run_state()
         #сохранение
         st.session_state.filename = uploaded_file.name
@@ -179,6 +182,7 @@ if source_option == "Загрузка видео":
 #блок вебки
 elif source_option == "Веб-камера":
     if st.button("Включить камеру"):
+        result_placeholder.empty()
         reset_run_state() 
         #убирание старых данных
         result_placeholder.empty() #убрать кнопку скачать
@@ -198,7 +202,7 @@ if cap is None and st.session_state.processing and st.session_state.active_cap i
 #основной цикл обработки при старте
 if cap is not None: #проверка видео потока
     st.session_state.active_cap = cap   #сохранение на случай остановки    
-    st_frame = st.empty()   #контейнер для кадров                                    #элемент на странице, куда будем выводить кадры
+    st_frame = st.empty()   #контейнер для кадров         
     stop_button = st.button("Остановить")
 
     if stop_button: #флаг, потому что нельзя прервать обработку
